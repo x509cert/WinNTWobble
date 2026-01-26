@@ -3,6 +3,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <dwmapi.h> 
+#pragma comment(lib, "dwmapi.lib")
 #include <cmath>
 #include <random>
 #include <array>
@@ -116,27 +118,27 @@ static void DrawFilledPolygon(
         const XMVECTOR vS = XMVectorMultiply(XMVectorMultiply(vPerspDist, vInvZ), vScale);
         
         // Final position: result = n * s + center
-        const XMVECTOR vResultX = XMVectorMultiplyAdd(vNx, vS, vCenterX);
-        const XMVECTOR vResultY = XMVectorMultiplyAdd(vNy, vS, vCenterY);
+            const XMVECTOR vResultX = XMVectorMultiplyAdd(vNx, vS, vCenterX);
+            const XMVECTOR vResultY = XMVectorMultiplyAdd(vNy, vS, vCenterY);
         
-        // Convert to integers and store
-        const XMVECTOR vIntX = XMVectorTruncate(vResultX);
-        const XMVECTOR vIntY = XMVectorTruncate(vResultY);
+            // Convert to integers and store
+            const XMVECTOR vIntX = XMVectorTruncate(vResultX);
+            const XMVECTOR vIntY = XMVectorTruncate(vResultY);
         
-        // Store results
-        alignas(16) float tempX[4], tempY[4];
-        XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempX), vIntX);
-        XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempY), vIntY);
+            // Store results to temp arrays
+            alignas(16) float tempX[4], tempY[4];
+            XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempX), vIntX);
+            XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempY), vIntY);
         
-        pts[i].x = static_cast<LONG>(tempX[0]);
-        pts[i].y = static_cast<LONG>(tempY[0]);
-        pts[i+1].x = static_cast<LONG>(tempX[1]);
-        pts[i+1].y = static_cast<LONG>(tempY[1]);
-        pts[i+2].x = static_cast<LONG>(tempX[2]);
-        pts[i+2].y = static_cast<LONG>(tempY[2]);
-        pts[i+3].x = static_cast<LONG>(tempX[3]);
-        pts[i+3].y = static_cast<LONG>(tempY[3]);
-    }
+            pts[i].x = static_cast<LONG>(tempX[0]);
+            pts[i].y = static_cast<LONG>(tempY[0]);
+            pts[i+1].x = static_cast<LONG>(tempX[1]);
+            pts[i+1].y = static_cast<LONG>(tempY[1]);
+            pts[i+2].x = static_cast<LONG>(tempX[2]);
+            pts[i+2].y = static_cast<LONG>(tempY[2]);
+            pts[i+3].x = static_cast<LONG>(tempX[3]);
+            pts[i+3].y = static_cast<LONG>(tempY[3]);
+        }
 
     // Draw only the actual 18 vertices (ignore padding)
     ::Polygon(g_hdcBack, pts, static_cast<int>(POLY_VERTEX_COUNT));
@@ -319,7 +321,7 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
-    MSG msg = {};
+    MSG msg {};
     while (g_isRunning) [[likely]] {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) [[unlikely]] {
@@ -353,6 +355,7 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
         }
 
         Render();
+        DwmFlush();
     }
 
     return static_cast<int>(msg.wParam);
