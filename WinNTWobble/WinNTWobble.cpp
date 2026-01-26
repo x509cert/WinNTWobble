@@ -159,6 +159,13 @@ static void DrawLabelsInColumn(
     bool isLeftSide,
     int columnX) noexcept
 {
+    // Create larger font for readability
+    HFONT hFont = CreateFontA(
+        20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Consolas");
+    HFONT hOldFont = static_cast<HFONT>(SelectObject(g_hdcBack, hFont));
+    
     HPEN hPen = CreatePen(PS_DOT, 1, color);
     HPEN hOldPen = static_cast<HPEN>(SelectObject(g_hdcBack, hPen));
     
@@ -180,16 +187,14 @@ static void DrawLabelsInColumn(
         snprintf(buf, sizeof(buf), "%s%zu: (%.0f, %.0f)", label, i, poly[i].x, poly[i].y);
         int textLen = static_cast<int>(strlen(buf));
         
-        // Calculate text width (approximate: 7 pixels per character)
-        int textWidth = textLen * 7;
+        // Calculate text width (approximate: 10 pixels per character for larger font)
+        int textWidth = textLen * 10;
         
         int textX, lineStartX;
         if (isLeftSide) {
-            // Left side: text on left, line starts from right of text
             textX = columnX;
             lineStartX = columnX + textWidth + 10;
         } else {
-            // Right side: line starts from left of text
             textX = columnX;
             lineStartX = columnX - 10;
         }
@@ -198,13 +203,13 @@ static void DrawLabelsInColumn(
         TextOutA(g_hdcBack, textX, labelY, buf, textLen);
         
         // Draw leader line from text to vertex
-        MoveToEx(g_hdcBack, lineStartX, labelY + 6, nullptr);
+        MoveToEx(g_hdcBack, lineStartX, labelY + 10, nullptr);
         LineTo(g_hdcBack, pts[i].x, pts[i].y);
         
         // Draw vertex marker
         HBRUSH hMarker = CreateSolidBrush(color);
         HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(g_hdcBack, hMarker));
-        Ellipse(g_hdcBack, pts[i].x - 5, pts[i].y - 5, pts[i].x + 5, pts[i].y + 5);
+        Ellipse(g_hdcBack, pts[i].x - 6, pts[i].y - 6, pts[i].x + 6, pts[i].y + 6);
         SelectObject(g_hdcBack, hOldBrush);
         DeleteObject(hMarker);
         
@@ -212,12 +217,14 @@ static void DrawLabelsInColumn(
         char indexBuf[4];
         snprintf(indexBuf, sizeof(indexBuf), "%zu", i);
         SetTextColor(g_hdcBack, RGB(0, 0, 0));
-        TextOutA(g_hdcBack, pts[i].x - 3, pts[i].y - 6, indexBuf, static_cast<int>(strlen(indexBuf)));
+        TextOutA(g_hdcBack, pts[i].x - 5, pts[i].y - 8, indexBuf, static_cast<int>(strlen(indexBuf)));
         SetTextColor(g_hdcBack, color);
     }
     
     SelectObject(g_hdcBack, hOldPen);
     DeleteObject(hPen);
+    SelectObject(g_hdcBack, hOldFont);
+    DeleteObject(hFont);
 }
 
 void DrawNT(float centerX, float centerY, float scale) noexcept {
