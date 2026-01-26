@@ -61,8 +61,6 @@ inline void RandomColorF(float& r, float& g, float& b) noexcept {
 
 inline POINT TransformPoint(float px, float py, float cx, float cy, float cz,
     float sx, float sy, float sz, float scale, float centerX, float centerY) noexcept {
-    [[assume(scale > 0.0f)]];
-    [[assume(PERSPECTIVE_DIST > 0.0f)]];
     
     const float y = py * cx;
     const float z1 = py * sx;
