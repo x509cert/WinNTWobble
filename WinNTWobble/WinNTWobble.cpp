@@ -20,6 +20,7 @@ constexpr float INV_BASE_WIDTH = 0.50f / BASE_WIDTH;
 
 // GDI resources
 HDC g_hdcBack = nullptr;
+HDC g_hdcWindow = nullptr;  // Cached window DC (CS_OWNDC)
 HBITMAP g_hbmBack = nullptr;
 HBITMAP g_hbmOld = nullptr;
 HBRUSH g_hBrush = nullptr;
@@ -43,15 +44,26 @@ bool g_showBorder = true;
 std::mt19937 g_rng{std::random_device{}()};
 std::uniform_real_distribution<float> g_colorDist{0.0f, 1.0f};
 
-struct Point2F { float x, y; };
+// SoA (Structure of Arrays) layout for SIMD-friendly access
+// Padded to 20 vertices (divisible by 4) - last 2 are duplicates for degenerate handling
+constexpr size_t POLY_VERTEX_COUNT = 18;  // Actual vertices for GDI
+constexpr size_t POLY_SIMD_COUNT = 20;    // Padded for SIMD (5 batches of 4)
 
-constexpr auto g_ntPoly = std::to_array<Point2F>({
-    {-146, -93}, {-110, -93}, { -26,  32}, { -26, -93},
-    { 146, -93}, { 146, -57}, {  97, -57}, {  97,  57},
-    {  97,  93}, {  60,  93}, {  60, -57}, {   9, -57},
-    {   9,  57}, {   9,  93}, { -27,  93}, {-110, -32},
-    {-110,  93}, {-146,  93},
-});
+alignas(16) constexpr float g_ntPolyX[POLY_SIMD_COUNT] = {
+    -146, -110,  -26,  -26,   // batch 0
+     146,  146,   97,   97,   // batch 1
+      97,   60,   60,    9,   // batch 2
+       9,    9,  -27, -110,   // batch 3
+    -110, -146, -146, -146    // batch 4 (last 2 are padding duplicates)
+};
+
+alignas(16) constexpr float g_ntPolyY[POLY_SIMD_COUNT] = {
+     -93,  -93,   32,  -93,   // batch 0
+     -93,  -57,  -57,   57,   // batch 1
+      93,   93,  -57,  -57,   // batch 2
+      57,   93,   93,  -32,   // batch 3
+      93,   93,   93,   93    // batch 4 (last 2 are padding duplicates)
+};
 
 inline void RandomColorF(float& r, float& g, float& b) noexcept {
     r = g_colorDist(g_rng);
@@ -59,41 +71,82 @@ inline void RandomColorF(float& r, float& g, float& b) noexcept {
     b = g_colorDist(g_rng);
 }
 
-inline POINT TransformPoint(float px, float py, float cx, float cy, float cz,
-    float sx, float sy, float sz, float scale, float centerX, float centerY) noexcept {
-    
-    const float y = py * cx;
-    const float z1 = py * sx;
-    const float x = px * cy + z1 * sy;
-    const float z = z1 * cy - px * sy;
-    const float nx = x * cz - y * sz;
-    const float ny = x * sz + y * cz;
-    const float invZ = 1.0f / (PERSPECTIVE_DIST + z);
-    const float s = PERSPECTIVE_DIST * invZ * scale;
-    return { static_cast<LONG>(nx * s + centerX), static_cast<LONG>(ny * s + centerY) };
-}
-
+// SIMD-optimized polygon transformation using SoA layout
 static void DrawFilledPolygon(
     float cx, float cy, float cz,
     float sx, float sy, float sz,
     float scale, float centerX, float centerY) noexcept
 {
-    constexpr auto N = g_ntPoly.size();
-    POINT pts[N];
+    alignas(16) POINT pts[POLY_SIMD_COUNT];
     
-    for (auto i = 0uz; i < N; ++i) {
-        pts[i] = TransformPoint(g_ntPoly[i].x, g_ntPoly[i].y, 
-                                cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
+    // Broadcast constants to SIMD registers
+    const XMVECTOR vCx = XMVectorReplicate(cx);
+    const XMVECTOR vCy = XMVectorReplicate(cy);
+    const XMVECTOR vCz = XMVectorReplicate(cz);
+    const XMVECTOR vSx = XMVectorReplicate(sx);
+    const XMVECTOR vSy = XMVectorReplicate(sy);
+    const XMVECTOR vSz = XMVectorReplicate(sz);
+    const XMVECTOR vScale = XMVectorReplicate(scale);
+    const XMVECTOR vCenterX = XMVectorReplicate(centerX);
+    const XMVECTOR vCenterY = XMVectorReplicate(centerY);
+    const XMVECTOR vPerspDist = XMVectorReplicate(PERSPECTIVE_DIST);
+    
+    // Process all 20 vertices in 5 batches of 4 (no remainder loop needed)
+    for (size_t i = 0; i < POLY_SIMD_COUNT; i += 4) {
+        // Aligned SIMD load from SoA arrays (much faster than XMVectorSet)
+        const XMVECTOR vPx = XMLoadFloat4(reinterpret_cast<const XMFLOAT4*>(&g_ntPolyX[i]));
+        const XMVECTOR vPy = XMLoadFloat4(reinterpret_cast<const XMFLOAT4*>(&g_ntPolyY[i]));
+        
+        // Transform: y = py * cx, z1 = py * sx
+        const XMVECTOR vY = XMVectorMultiply(vPy, vCx);
+        const XMVECTOR vZ1 = XMVectorMultiply(vPy, vSx);
+        
+        // x = px * cy + z1 * sy
+        const XMVECTOR vX = XMVectorMultiplyAdd(vZ1, vSy, XMVectorMultiply(vPx, vCy));
+        
+        // z = z1 * cy - px * sy
+        const XMVECTOR vZ = XMVectorSubtract(XMVectorMultiply(vZ1, vCy), XMVectorMultiply(vPx, vSy));
+        
+        // nx = x * cz - y * sz, ny = x * sz + y * cz
+        const XMVECTOR vNx = XMVectorSubtract(XMVectorMultiply(vX, vCz), XMVectorMultiply(vY, vSz));
+        const XMVECTOR vNy = XMVectorMultiplyAdd(vX, vSz, XMVectorMultiply(vY, vCz));
+        
+        // Perspective: invZ = 1 / (PERSPECTIVE_DIST + z), s = PERSPECTIVE_DIST * invZ * scale
+        const XMVECTOR vInvZ = XMVectorReciprocal(XMVectorAdd(vPerspDist, vZ));
+        const XMVECTOR vS = XMVectorMultiply(XMVectorMultiply(vPerspDist, vInvZ), vScale);
+        
+        // Final position: result = n * s + center
+        const XMVECTOR vResultX = XMVectorMultiplyAdd(vNx, vS, vCenterX);
+        const XMVECTOR vResultY = XMVectorMultiplyAdd(vNy, vS, vCenterY);
+        
+        // Convert to integers and store
+        const XMVECTOR vIntX = XMVectorTruncate(vResultX);
+        const XMVECTOR vIntY = XMVectorTruncate(vResultY);
+        
+        // Store results
+        alignas(16) float tempX[4], tempY[4];
+        XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempX), vIntX);
+        XMStoreFloat4(reinterpret_cast<XMFLOAT4*>(tempY), vIntY);
+        
+        pts[i].x = static_cast<LONG>(tempX[0]);
+        pts[i].y = static_cast<LONG>(tempY[0]);
+        pts[i+1].x = static_cast<LONG>(tempX[1]);
+        pts[i+1].y = static_cast<LONG>(tempY[1]);
+        pts[i+2].x = static_cast<LONG>(tempX[2]);
+        pts[i+2].y = static_cast<LONG>(tempY[2]);
+        pts[i+3].x = static_cast<LONG>(tempX[3]);
+        pts[i+3].y = static_cast<LONG>(tempY[3]);
     }
 
-    ::Polygon(g_hdcBack, pts, static_cast<int>(N));
+    // Draw only the actual 18 vertices (ignore padding)
+    ::Polygon(g_hdcBack, pts, static_cast<int>(POLY_VERTEX_COUNT));
 }
 
 void DrawNT(float centerX, float centerY, float scale) noexcept {
     // Pre-calculate time multiplier (used twice)
     const float time04 = g_time * 0.4f;
     
-    // Batch first set using SIMD - only need sin values, not cos (eliminates 3 unused cos calculations)
+    // Batch first set using SIMD - only need sin values, not cos
     const XMVECTOR timeAngles = XMVectorSet(time04, g_time * 0.8f, g_time * 0.6f, 0.0f);
     const XMVECTOR sinVec1 = XMVectorSin(timeAngles);
     
@@ -137,8 +190,11 @@ void CreateBackBuffer(HWND hWnd) {
     
     g_hBgBrush = CreateSolidBrush(RGB(31, 31, 31));
     
-    SetBkMode(g_hdcBack, TRANSPARENT);
-}
+        SetBkMode(g_hdcBack, TRANSPARENT);
+    
+        // Select background brush for PatBlt operations
+        SelectObject(g_hdcBack, g_hBgBrush);
+    }
 
 void DiscardBackBuffer() noexcept {
     if (g_hdcBack) {
@@ -158,11 +214,11 @@ void DiscardBackBuffer() noexcept {
     return static_cast<BYTE>(std::lerp(current, target, t) * 255.0f);
 }
 
-void Render(HWND hWnd) noexcept {
-    if (!g_hdcBack) [[unlikely]] return;
+void Render() noexcept {
+if (!g_hdcBack) [[unlikely]] return;
     
-    const RECT rc = { 0, 0, g_width, g_height };
-    FillRect(g_hdcBack, &rc, g_hBgBrush);
+    // Clear background using PatBlt (faster than FillRect - uses selected brush)
+    PatBlt(g_hdcBack, 0, 0, g_width, g_height, PATCOPY);
 
     const auto progress = g_colorProgress;
     const BYTE r = LerpToByte(g_currentR, g_targetR, progress);
@@ -174,8 +230,9 @@ void Render(HWND hWnd) noexcept {
         g_lastR = r; g_lastG = g; g_lastB = b;
         if (g_hBrush) DeleteObject(g_hBrush);
         g_hBrush = CreateSolidBrush(RGB(r, g, b));
-        SelectObject(g_hdcBack, g_hBrush);
     }
+    // Always select fill brush before drawing (PatBlt uses bg brush, polygon needs fill brush)
+    SelectObject(g_hdcBack, g_hBrush);
     
     const float scale = std::min(static_cast<float>(g_width), static_cast<float>(g_height)) * INV_BASE_WIDTH;
     
@@ -198,10 +255,12 @@ void Render(HWND hWnd) noexcept {
     
     DrawNT(g_width * 0.5f, g_height * 0.5f, scale);
 
-    HDC hdc = GetDC(hWnd);
-    BitBlt(hdc, 0, 0, g_width, g_height, g_hdcBack, 0, 0, SRCCOPY);
-    ReleaseDC(hWnd, hdc);
-}
+        // Re-select background brush for next frame's PatBlt
+        SelectObject(g_hdcBack, g_hBgBrush);
+
+        // Use cached window DC (CS_OWNDC) - no GetDC/ReleaseDC overhead
+        BitBlt(g_hdcWindow, 0, 0, g_width, g_height, g_hdcBack, 0, 0, SRCCOPY);
+    }
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -227,7 +286,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hWnd, &ps);
-        Render(hWnd);
+        Render();
         EndPaint(hWnd, &ps);
         return 0;
     }
@@ -253,6 +312,9 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
     HWND hWnd = CreateWindowExW(0, L"NTWobble", L"NT Wobble", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 600, 500, nullptr, nullptr, hInstance, nullptr);
     if (!hWnd) [[unlikely]] return 0;
+
+    // Cache window DC (CS_OWNDC ensures it's private and persistent)
+    g_hdcWindow = GetDC(hWnd);
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
@@ -290,7 +352,7 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
             RandomColorF(g_targetR, g_targetG, g_targetB);
         }
 
-        Render(hWnd);
+        Render();
     }
 
     return static_cast<int>(msg.wParam);
