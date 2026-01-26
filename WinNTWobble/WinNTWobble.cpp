@@ -44,14 +44,26 @@ std::uniform_real_distribution<float> g_colorDist{0.0f, 1.0f};
 // 2D point for polygons
 struct Point2F { float x, y; };
 
-// N polygon vertices (std::array for type safety)
-constexpr std::array<Point2F, 7> g_nPoly = {{
-    {-146, -93}, {-110, -93}, {-25, 32}, {-25, 93}, {-110, -32}, {-110, 93}, {-146, 93},
-}};
-
-// T polygon vertices
-constexpr std::array<Point2F, 11> g_tPoly = {{
-    {-26, -93}, {147, -93}, {147, -57}, {97, -57}, {97, 92}, {60, 92}, {60, -57}, {9, -57}, {9, 92}, {-27, 92}, {-26, 31},
+// NT polygon vertices - combined single shape
+constexpr std::array<Point2F, 18> g_ntPoly = {{
+    {-146, -93},    // 0
+    {-110, -93},    // 1
+    { -26,  32},    // 2
+    { -26, -93},    // 3
+    { 146, -93},    // 4
+    { 146, -57},    // 5
+    {  97, -57},    // 6
+    {  97,  57},    // 7
+    {  97,  93},    // 8
+    {  60,  93},    // 9
+    {  60, -57},    // 10
+    {   9, -57},    // 11
+    {   9,  57},    // 12
+    {   9,  93},    // 13
+    { -27,  93},    // 14
+    {-110, -32},    // 15
+    {-110,  93},    // 16
+    {-146,  93},    // 17
 }};
 
 inline void RandomColorF(float& r, float& g, float& b) noexcept {
@@ -228,19 +240,33 @@ static void DrawLabelsInColumn(
 }
 
 void DrawNT(float centerX, float centerY, float scale) noexcept {
+    constexpr size_t N = g_ntPoly.size();
+    
     if (g_debugMode) {
-        // Draw polygons with XOR mode in different colors
-        POINT nPts[7], tPts[11];
+        // Draw combined polygon with XOR mode
+        POINT ntPts[N];
+        constexpr COLORREF ntColor = RGB(100, 180, 255);  // Light blue
         
-        constexpr COLORREF nColor = RGB(255, 100, 100);  // Red-ish for N
-        constexpr COLORREF tColor = RGB(100, 100, 255);  // Blue-ish for T
+        for (size_t i = 0; i < N; ++i) {
+            ntPts[i] = TransformPointStatic(g_ntPoly[i].x, g_ntPoly[i].y, scale, centerX, centerY);
+        }
         
-        DrawFilledPolygonDebugXOR(g_nPoly, scale, centerX, centerY, nColor, nPts);
-        DrawFilledPolygonDebugXOR(g_tPoly, scale, centerX, centerY, tColor, tPts);
+        int oldRop = SetROP2(g_hdcBack, R2_XORPEN);
+        HBRUSH hBrush = CreateSolidBrush(ntColor);
+        HPEN hPen = CreatePen(PS_SOLID, 2, ntColor);
+        HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(g_hdcBack, hBrush));
+        HPEN hOldPen = static_cast<HPEN>(SelectObject(g_hdcBack, hPen));
         
-        // Draw labels - N on left (lines from right of text), T on right (lines from left of text)
-        DrawLabelsInColumn(g_nPoly, nPts, "N", nColor, true, 10);
-        DrawLabelsInColumn(g_tPoly, tPts, "T", tColor, false, g_width - 150);
+        ::Polygon(g_hdcBack, ntPts, static_cast<int>(N));
+        
+        SelectObject(g_hdcBack, hOldBrush);
+        SelectObject(g_hdcBack, hOldPen);
+        DeleteObject(hBrush);
+        DeleteObject(hPen);
+        SetROP2(g_hdcBack, oldRop);
+        
+        // Draw labels on left side
+        DrawLabelsInColumn(g_ntPoly, ntPts, "", ntColor, true, 10);
         
         return;
     }
@@ -259,8 +285,7 @@ void DrawNT(float centerX, float centerY, float scale) noexcept {
     XMScalarSinCos(&sy, &cy, angleY);
     XMScalarSinCos(&sz, &cz, angleZ);
 
-    DrawFilledPolygon(g_nPoly, cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
-    DrawFilledPolygon(g_tPoly, cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
+    DrawFilledPolygon(g_ntPoly, cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
 }
 
 void CreateBackBuffer(HWND hWnd) {
