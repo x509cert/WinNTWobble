@@ -9,7 +9,6 @@
 #include <algorithm>
 #include <numbers>
 #include <DirectXMath.h>
-#include <cstdio>
 
 using namespace DirectX;
 
@@ -33,67 +32,36 @@ float g_targetR, g_targetG, g_targetB;
 float g_colorProgress = 0.0f;
 LARGE_INTEGER g_perfFreq, g_lastTime;
 bool g_isRunning = true;
-bool g_debugMode = false;      // Toggle with Q key
-bool g_isFullScreen = false;   // Full screen state
-WINDOWPLACEMENT g_wpPrev = { sizeof(g_wpPrev) };  // Saved window placement
 
-// Modern C++ random number generator
 std::mt19937 g_rng{std::random_device{}()};
 std::uniform_real_distribution<float> g_colorDist{0.0f, 1.0f};
 
-// 2D point for polygons
 struct Point2F { float x, y; };
-
-// NT polygon vertices - combined single shape
 constexpr std::array<Point2F, 18> g_ntPoly = {{
-    {-146, -93},    // 0
-    {-110, -93},    // 1
-    { -26,  32},    // 2
-    { -26, -93},    // 3
-    { 146, -93},    // 4
-    { 146, -57},    // 5
-    {  97, -57},    // 6
-    {  97,  57},    // 7
-    {  97,  93},    // 8
-    {  60,  93},    // 9
-    {  60, -57},    // 10
-    {   9, -57},    // 11
-    {   9,  57},    // 12
-    {   9,  93},    // 13
-    { -27,  93},    // 14
-    {-110, -32},    // 15
-    {-110,  93},    // 16
-    {-146,  93},    // 17
+    {-146, -93},    
+    {-110, -93},    
+    { -26,  32},    
+    { -26, -93},    
+    { 146, -93},    
+    { 146, -57},    
+    {  97, -57},    
+    {  97,  57},    
+    {  97,  93},    
+    {  60,  93},    
+    {  60, -57},    
+    {   9, -57},    
+    {   9,  57},    
+    {   9,  93},    
+    { -27,  93},    
+    {-110, -32},    
+    {-110,  93},    
+    {-146,  93},    
 }};
 
 inline void RandomColorF(float& r, float& g, float& b) noexcept {
     r = g_colorDist(g_rng);
     g = g_colorDist(g_rng);
     b = g_colorDist(g_rng);
-}
-
-void ToggleFullScreen(HWND hWnd) {
-    DWORD dwStyle = GetWindowLong(hWnd, GWL_STYLE);
-    
-    if (!g_isFullScreen) {
-        MONITORINFO mi = { sizeof(mi) };
-        if (GetWindowPlacement(hWnd, &g_wpPrev) &&
-            GetMonitorInfo(MonitorFromWindow(hWnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
-            SetWindowLong(hWnd, GWL_STYLE, dwStyle & ~WS_OVERLAPPEDWINDOW);
-            SetWindowPos(hWnd, HWND_TOP,
-                mi.rcMonitor.left, mi.rcMonitor.top,
-                mi.rcMonitor.right - mi.rcMonitor.left,
-                mi.rcMonitor.bottom - mi.rcMonitor.top,
-                SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-        }
-        g_isFullScreen = true;
-    } else {
-        SetWindowLong(hWnd, GWL_STYLE, dwStyle | WS_OVERLAPPEDWINDOW);
-        SetWindowPlacement(hWnd, &g_wpPrev);
-        SetWindowPos(hWnd, nullptr, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
-        g_isFullScreen = false;
-    }
 }
 
 // Transform point with 3D rotation and perspective projection
@@ -110,12 +78,7 @@ inline POINT TransformPoint(float px, float py, float cx, float cy, float cz,
     return { static_cast<LONG>(nx * s + centerX), static_cast<LONG>(ny * s + centerY) };
 }
 
-// Simple transform for debug mode (no rotation)
-inline POINT TransformPointStatic(float px, float py, float scale, float centerX, float centerY) noexcept {
-    return { static_cast<LONG>(px * scale + centerX), static_cast<LONG>(py * scale + centerY) };
-}
-
-// Draw filled polygon using GDI - all stack allocated
+// Draw filled polygon using GDI
 template<size_t N> 
 static void DrawFilledPolygon(
     const std::array<Point2F, N>& poly,
@@ -132,145 +95,7 @@ static void DrawFilledPolygon(
     ::Polygon(g_hdcBack, pts, static_cast<int>(N));
 }
 
-// Draw polygon in debug mode with XOR colors
-template<size_t N>
-static void DrawFilledPolygonDebugXOR(
-    const std::array<Point2F, N>& poly,
-    float scale, float centerX, float centerY,
-    COLORREF color, POINT* outPts) noexcept
-{
-    for (size_t i = 0; i < N; ++i) {
-        outPts[i] = TransformPointStatic(poly[i].x, poly[i].y, scale, centerX, centerY);
-    }
-
-    // Use XOR mode for drawing
-    int oldRop = SetROP2(g_hdcBack, R2_XORPEN);
-    
-    HBRUSH hBrush = CreateSolidBrush(color);
-    HPEN hPen = CreatePen(PS_SOLID, 2, color);
-    HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(g_hdcBack, hBrush));
-    HPEN hOldPen = static_cast<HPEN>(SelectObject(g_hdcBack, hPen));
-    
-    ::Polygon(g_hdcBack, outPts, static_cast<int>(N));
-    
-    SelectObject(g_hdcBack, hOldBrush);
-    SelectObject(g_hdcBack, hOldPen);
-    DeleteObject(hBrush);
-    DeleteObject(hPen);
-    
-    SetROP2(g_hdcBack, oldRop);
-}
-
-// Draw labels in columns on left/right sides of screen
-template<size_t N>
-static void DrawLabelsInColumn(
-    const std::array<Point2F, N>& poly,
-    const POINT* pts,
-    const char* label,
-    COLORREF color,
-    bool isLeftSide,
-    int columnX) noexcept
-{
-    // Create larger font for readability
-    HFONT hFont = CreateFontA(
-        20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Consolas");
-    HFONT hOldFont = static_cast<HFONT>(SelectObject(g_hdcBack, hFont));
-    
-    HPEN hPen = CreatePen(PS_DOT, 1, color);
-    HPEN hOldPen = static_cast<HPEN>(SelectObject(g_hdcBack, hPen));
-    
-    SetTextColor(g_hdcBack, color);
-    SetBkMode(g_hdcBack, TRANSPARENT);
-    
-    char buf[32];
-    
-    // Spread labels across full screen height with padding
-    const int topPadding = 50;
-    const int bottomPadding = 50;
-    const int availableHeight = g_height - topPadding - bottomPadding;
-    const int lineHeight = availableHeight / static_cast<int>(N);
-    
-    for (size_t i = 0; i < N; ++i) {
-        int labelY = topPadding + static_cast<int>(i) * lineHeight;
-        
-        // Format label text
-        snprintf(buf, sizeof(buf), "%s%zu: (%.0f, %.0f)", label, i, poly[i].x, poly[i].y);
-        int textLen = static_cast<int>(strlen(buf));
-        
-        // Calculate text width (approximate: 10 pixels per character for larger font)
-        int textWidth = textLen * 10;
-        
-        int textX, lineStartX;
-        if (isLeftSide) {
-            textX = columnX;
-            lineStartX = columnX + textWidth + 10;
-        } else {
-            textX = columnX;
-            lineStartX = columnX - 10;
-        }
-        
-        // Draw label text
-        TextOutA(g_hdcBack, textX, labelY, buf, textLen);
-        
-        // Draw leader line from text to vertex
-        MoveToEx(g_hdcBack, lineStartX, labelY + 10, nullptr);
-        LineTo(g_hdcBack, pts[i].x, pts[i].y);
-        
-        // Draw vertex marker
-        HBRUSH hMarker = CreateSolidBrush(color);
-        HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(g_hdcBack, hMarker));
-        Ellipse(g_hdcBack, pts[i].x - 6, pts[i].y - 6, pts[i].x + 6, pts[i].y + 6);
-        SelectObject(g_hdcBack, hOldBrush);
-        DeleteObject(hMarker);
-        
-        // Draw index number at vertex
-        char indexBuf[4];
-        snprintf(indexBuf, sizeof(indexBuf), "%zu", i);
-        SetTextColor(g_hdcBack, RGB(0, 0, 0));
-        TextOutA(g_hdcBack, pts[i].x - 5, pts[i].y - 8, indexBuf, static_cast<int>(strlen(indexBuf)));
-        SetTextColor(g_hdcBack, color);
-    }
-    
-    SelectObject(g_hdcBack, hOldPen);
-    DeleteObject(hPen);
-    SelectObject(g_hdcBack, hOldFont);
-    DeleteObject(hFont);
-}
-
 void DrawNT(float centerX, float centerY, float scale) noexcept {
-    constexpr size_t N = g_ntPoly.size();
-    
-    if (g_debugMode) {
-        // Draw combined polygon with XOR mode
-        POINT ntPts[N];
-        constexpr COLORREF ntColor = RGB(100, 180, 255);  // Light blue
-        
-        for (size_t i = 0; i < N; ++i) {
-            ntPts[i] = TransformPointStatic(g_ntPoly[i].x, g_ntPoly[i].y, scale, centerX, centerY);
-        }
-        
-        int oldRop = SetROP2(g_hdcBack, R2_XORPEN);
-        HBRUSH hBrush = CreateSolidBrush(ntColor);
-        HPEN hPen = CreatePen(PS_SOLID, 2, ntColor);
-        HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject(g_hdcBack, hBrush));
-        HPEN hOldPen = static_cast<HPEN>(SelectObject(g_hdcBack, hPen));
-        
-        ::Polygon(g_hdcBack, ntPts, static_cast<int>(N));
-        
-        SelectObject(g_hdcBack, hOldBrush);
-        SelectObject(g_hdcBack, hOldPen);
-        DeleteObject(hBrush);
-        DeleteObject(hPen);
-        SetROP2(g_hdcBack, oldRop);
-        
-        // Draw labels on left side
-        DrawLabelsInColumn(g_ntPoly, ntPts, "", ntColor, true, 10);
-        
-        return;
-    }
-
     float sin04, cos04, sin08, cos08, sin06, cos06;
     XMScalarSinCos(&sin04, &cos04, g_time * 0.4f);
     XMScalarSinCos(&sin08, &cos08, g_time * 0.8f);
@@ -327,15 +152,10 @@ void Render(HWND hWnd) noexcept {
     const RECT rc = { 0, 0, g_width, g_height };
     FillRect(g_hdcBack, &rc, g_hBgBrush);
 
-    BYTE r, g, b;
-    if (g_debugMode) {
-        r = 80; g = 80; b = 80;  // Dark gray base for XOR visibility
-    } else {
-        const float progress = g_colorProgress;
-        r = static_cast<BYTE>((g_currentR + (g_targetR - g_currentR) * progress) * 255.0f);
-        g = static_cast<BYTE>((g_currentG + (g_targetG - g_currentG) * progress) * 255.0f);
-        b = static_cast<BYTE>((g_currentB + (g_targetB - g_currentB) * progress) * 255.0f);
-    }
+    const float progress = g_colorProgress;
+    const BYTE r = static_cast<BYTE>((g_currentR + (g_targetR - g_currentR) * progress) * 255.0f);
+    const BYTE g = static_cast<BYTE>((g_currentG + (g_targetG - g_currentG) * progress) * 255.0f);
+    const BYTE b = static_cast<BYTE>((g_currentB + (g_targetB - g_currentB) * progress) * 255.0f);
 
     if (g_hBrush) DeleteObject(g_hBrush);
     g_hBrush = CreateSolidBrush(RGB(r, g, b));
@@ -343,12 +163,6 @@ void Render(HWND hWnd) noexcept {
     
     const float scale = std::min(static_cast<float>(g_width), static_cast<float>(g_height)) * INV_BASE_WIDTH;
     DrawNT(g_width * 0.5f, g_height * 0.5f, scale);
-
-    if (g_debugMode) {
-        SetTextColor(g_hdcBack, RGB(255, 255, 0));
-        const char* msg = "DEBUG MODE - Q: exit | Overlap shows as different color";
-        TextOutA(g_hdcBack, 10, 10, msg, static_cast<int>(strlen(msg)));
-    }
 
     HDC hdc = GetDC(hWnd);
     BitBlt(hdc, 0, 0, g_width, g_height, g_hdcBack, 0, 0, SRCCOPY);
@@ -368,21 +182,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_SIZE:
         DiscardBackBuffer();
         CreateBackBuffer(hWnd);
-        return 0;
-
-    case WM_KEYDOWN:
-        if (wParam == 'Q') {
-            g_debugMode = !g_debugMode;
-            if (g_debugMode) {
-                ToggleFullScreen(hWnd);  // Go full screen when entering debug
-            } else if (g_isFullScreen) {
-                ToggleFullScreen(hWnd);  // Exit full screen when leaving debug
-            }
-            InvalidateRect(hWnd, nullptr, FALSE);
-        }
-        if (wParam == VK_ESCAPE && g_isFullScreen) {
-            ToggleFullScreen(hWnd);
-        }
         return 0;
 
     case WM_PAINT: {
@@ -430,26 +229,24 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
 
         if (!g_isRunning) break;
 
-        if (!g_debugMode) {
-            LARGE_INTEGER currentTime;
-            QueryPerformanceCounter(&currentTime);
-            const float deltaTime = static_cast<float>(currentTime.QuadPart - g_lastTime.QuadPart) 
-                                  / static_cast<float>(g_perfFreq.QuadPart);
-            g_lastTime = currentTime;
+        LARGE_INTEGER currentTime;
+        QueryPerformanceCounter(&currentTime);
+        const float deltaTime = static_cast<float>(currentTime.QuadPart - g_lastTime.QuadPart) 
+                              / static_cast<float>(g_perfFreq.QuadPart);
+        g_lastTime = currentTime;
 
-            g_time += deltaTime * 3.0f;
-            if (g_time > TWO_PI * 1000.0f) [[unlikely]]
-                g_time -= TWO_PI * 1000.0f;
-            
-            g_colorProgress += deltaTime * 0.3f;
+        g_time += deltaTime * 3.0f;
+        if (g_time > TWO_PI * 1000.0f) [[unlikely]]
+            g_time -= TWO_PI * 1000.0f;
+        
+        g_colorProgress += deltaTime * 0.3f;
 
-            if (g_colorProgress >= 1.0f) [[unlikely]] {
-                g_colorProgress = 0.0f;
-                g_currentR = g_targetR;
-                g_currentG = g_targetG;
-                g_currentB = g_targetB;
-                RandomColorF(g_targetR, g_targetG, g_targetB);
-            }
+        if (g_colorProgress >= 1.0f) [[unlikely]] {
+            g_colorProgress = 0.0f;
+            g_currentR = g_targetR;
+            g_currentG = g_targetG;
+            g_currentB = g_targetB;
+            RandomColorF(g_targetR, g_targetG, g_targetB);
         }
 
         Render(hWnd);
