@@ -8,6 +8,7 @@
 #include <array>
 #include <algorithm>
 #include <numbers>
+#include <utility>
 #include <DirectXMath.h>
 
 using namespace DirectX;
@@ -23,7 +24,12 @@ HBITMAP g_hbmBack = nullptr;
 HBITMAP g_hbmOld = nullptr;
 HBRUSH g_hBrush = nullptr;
 HBRUSH g_hBgBrush = nullptr;
+HPEN g_hBorderPen = nullptr;
 int g_width = 0, g_height = 0;
+
+// Cached GDI state to avoid unnecessary recreation
+BYTE g_lastR = 0, g_lastG = 0, g_lastB = 0;
+int g_lastPenWidth = 0;
 
 // Animation state
 float g_time = 0.0f;
@@ -32,31 +38,20 @@ float g_targetR, g_targetG, g_targetB;
 float g_colorProgress = 0.0f;
 LARGE_INTEGER g_perfFreq, g_lastTime;
 bool g_isRunning = true;
+bool g_showBorder = true;
 
 std::mt19937 g_rng{std::random_device{}()};
 std::uniform_real_distribution<float> g_colorDist{0.0f, 1.0f};
 
 struct Point2F { float x, y; };
-constexpr std::array<Point2F, 18> g_ntPoly = {{
-    {-146, -93},    
-    {-110, -93},    
-    { -26,  32},    
-    { -26, -93},    
-    { 146, -93},    
-    { 146, -57},    
-    {  97, -57},    
-    {  97,  57},    
-    {  97,  93},    
-    {  60,  93},    
-    {  60, -57},    
-    {   9, -57},    
-    {   9,  57},    
-    {   9,  93},    
-    { -27,  93},    
-    {-110, -32},    
-    {-110,  93},    
-    {-146,  93},    
-}};
+
+constexpr auto g_ntPoly = std::to_array<Point2F>({
+    {-146, -93}, {-110, -93}, { -26,  32}, { -26, -93},
+    { 146, -93}, { 146, -57}, {  97, -57}, {  97,  57},
+    {  97,  93}, {  60,  93}, {  60, -57}, {   9, -57},
+    {   9,  57}, {   9,  93}, { -27,  93}, {-110, -32},
+    {-110,  93}, {-146,  93},
+});
 
 inline void RandomColorF(float& r, float& g, float& b) noexcept {
     r = g_colorDist(g_rng);
@@ -64,9 +59,11 @@ inline void RandomColorF(float& r, float& g, float& b) noexcept {
     b = g_colorDist(g_rng);
 }
 
-// Transform point with 3D rotation and perspective projection
 inline POINT TransformPoint(float px, float py, float cx, float cy, float cz,
     float sx, float sy, float sz, float scale, float centerX, float centerY) noexcept {
+    [[assume(scale > 0.0f)]];
+    [[assume(PERSPECTIVE_DIST > 0.0f)]];
+    
     const float y = py * cx;
     const float z1 = py * sx;
     const float x = px * cy + z1 * sy;
@@ -78,39 +75,52 @@ inline POINT TransformPoint(float px, float py, float cx, float cy, float cz,
     return { static_cast<LONG>(nx * s + centerX), static_cast<LONG>(ny * s + centerY) };
 }
 
-// Draw filled polygon using GDI
-template<size_t N> 
 static void DrawFilledPolygon(
-    const std::array<Point2F, N>& poly,
     float cx, float cy, float cz,
     float sx, float sy, float sz,
     float scale, float centerX, float centerY) noexcept
 {
+    constexpr auto N = g_ntPoly.size();
     POINT pts[N];
     
-    for (size_t i = 0; i < N; ++i) {
-        pts[i] = TransformPoint(poly[i].x, poly[i].y, cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
+    for (auto i = 0uz; i < N; ++i) {
+        pts[i] = TransformPoint(g_ntPoly[i].x, g_ntPoly[i].y, 
+                                cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
     }
 
     ::Polygon(g_hdcBack, pts, static_cast<int>(N));
 }
 
 void DrawNT(float centerX, float centerY, float scale) noexcept {
-    float sin04, cos04, sin08, cos08, sin06, cos06;
-    XMScalarSinCos(&sin04, &cos04, g_time * 0.4f);
-    XMScalarSinCos(&sin08, &cos08, g_time * 0.8f);
-    XMScalarSinCos(&sin06, &cos06, g_time * 0.6f);
+    // Pre-calculate time multiplier (used twice)
+    const float time04 = g_time * 0.4f;
+    
+    // Batch first set using SIMD - only need sin values, not cos (eliminates 3 unused cos calculations)
+    const XMVECTOR timeAngles = XMVectorSet(time04, g_time * 0.8f, g_time * 0.6f, 0.0f);
+    const XMVECTOR sinVec1 = XMVectorSin(timeAngles);
+    
+    const float sin04 = XMVectorGetX(sinVec1);
+    const float sin08 = XMVectorGetY(sinVec1);
+    const float sin06 = XMVectorGetZ(sinVec1);
 
+    // Calculate rotation angles
     const float angleX = sin08 * 0.3f;
-    const float angleY = g_time * 0.4f + sin06 * 0.2f;
+    const float angleY = time04 + sin06 * 0.2f;
     const float angleZ = g_time * 0.15f + sin04 * 0.15f;
 
-    float sx, cx, sy, cy, sz, cz;
-    XMScalarSinCos(&sx, &cx, angleX);
-    XMScalarSinCos(&sy, &cy, angleY);
-    XMScalarSinCos(&sz, &cz, angleZ);
+    // Batch second set using SIMD (3 scalar calls -> 1 vector call)
+    const XMVECTOR rotAngles = XMVectorSet(angleX, angleY, angleZ, 0.0f);
+    XMVECTOR sinVec2, cosVec2;
+    XMVectorSinCos(&sinVec2, &cosVec2, rotAngles);
+    
+    const float sx = XMVectorGetX(sinVec2);
+    const float cx = XMVectorGetX(cosVec2);
+    const float sy = XMVectorGetY(sinVec2);
+    const float cy = XMVectorGetY(cosVec2);
+    const float sz = XMVectorGetZ(sinVec2);
+    const float cz = XMVectorGetZ(cosVec2);
 
-    DrawFilledPolygon(g_ntPoly, cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
+    DrawFilledPolygon(cx, cy, cz, sx, sy, sz, scale, centerX, centerY);
 }
 
 void CreateBackBuffer(HWND hWnd) {
@@ -130,7 +140,6 @@ void CreateBackBuffer(HWND hWnd) {
     g_hBgBrush = CreateSolidBrush(RGB(31, 31, 31));
     
     SetBkMode(g_hdcBack, TRANSPARENT);
-    SelectObject(g_hdcBack, GetStockObject(NULL_PEN));
 }
 
 void DiscardBackBuffer() noexcept {
@@ -144,6 +153,11 @@ void DiscardBackBuffer() noexcept {
     }
     if (g_hBrush) { DeleteObject(g_hBrush); g_hBrush = nullptr; }
     if (g_hBgBrush) { DeleteObject(g_hBgBrush); g_hBgBrush = nullptr; }
+    if (g_hBorderPen) { DeleteObject(g_hBorderPen); g_hBorderPen = nullptr; }
+}
+
+[[nodiscard]] constexpr BYTE LerpToByte(float current, float target, float t) noexcept {
+    return static_cast<BYTE>(std::lerp(current, target, t) * 255.0f);
 }
 
 void Render(HWND hWnd) noexcept {
@@ -152,16 +166,38 @@ void Render(HWND hWnd) noexcept {
     const RECT rc = { 0, 0, g_width, g_height };
     FillRect(g_hdcBack, &rc, g_hBgBrush);
 
-    const float progress = g_colorProgress;
-    const BYTE r = static_cast<BYTE>((g_currentR + (g_targetR - g_currentR) * progress) * 255.0f);
-    const BYTE g = static_cast<BYTE>((g_currentG + (g_targetG - g_currentG) * progress) * 255.0f);
-    const BYTE b = static_cast<BYTE>((g_currentB + (g_targetB - g_currentB) * progress) * 255.0f);
+    const auto progress = g_colorProgress;
+    const BYTE r = LerpToByte(g_currentR, g_targetR, progress);
+    const BYTE g = LerpToByte(g_currentG, g_targetG, progress);
+    const BYTE b = LerpToByte(g_currentB, g_targetB, progress);
 
-    if (g_hBrush) DeleteObject(g_hBrush);
-    g_hBrush = CreateSolidBrush(RGB(r, g, b));
-    SelectObject(g_hdcBack, g_hBrush);
+    // Only recreate brush when color actually changes
+    if (r != g_lastR || g != g_lastG || b != g_lastB) {
+        g_lastR = r; g_lastG = g; g_lastB = b;
+        if (g_hBrush) DeleteObject(g_hBrush);
+        g_hBrush = CreateSolidBrush(RGB(r, g, b));
+        SelectObject(g_hdcBack, g_hBrush);
+    }
     
     const float scale = std::min(static_cast<float>(g_width), static_cast<float>(g_height)) * INV_BASE_WIDTH;
+    
+    // Scale border thickness with polygon size (min 1px, scales with window)
+    if (g_showBorder) {
+        const int penWidth = std::max(1, static_cast<int>(scale * 1.5f));
+        // Only recreate pen when width changes (typically on resize)
+        if (penWidth != g_lastPenWidth) {
+            g_lastPenWidth = penWidth;
+            if (g_hBorderPen) DeleteObject(g_hBorderPen);
+            g_hBorderPen = CreatePen(PS_SOLID, penWidth, RGB(255, 255, 255));
+            SelectObject(g_hdcBack, g_hBorderPen);
+        }
+    } else {
+        if (g_lastPenWidth != 0) {
+            g_lastPenWidth = 0;
+            SelectObject(g_hdcBack, GetStockObject(NULL_PEN));
+        }
+    }
+    
     DrawNT(g_width * 0.5f, g_height * 0.5f, scale);
 
     HDC hdc = GetDC(hWnd);
@@ -184,6 +220,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         CreateBackBuffer(hWnd);
         return 0;
 
+    case WM_KEYDOWN:
+        if (wParam == 'B') {
+            g_showBorder = !g_showBorder;
+        }
+        return 0;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hWnd, &ps);
@@ -201,6 +243,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     default:
         break;
     }
+
     return DefWindowProc(hWnd, message, wParam, lParam);
 }
 
@@ -211,15 +254,15 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
 
     HWND hWnd = CreateWindowExW(0, L"NTWobble", L"NT Wobble", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 600, 500, nullptr, nullptr, hInstance, nullptr);
-    if (!hWnd) return 0;
+    if (!hWnd) [[unlikely]] return 0;
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
 
     MSG msg = {};
-    while (g_isRunning) {
+    while (g_isRunning) [[likely]] {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) {
+            if (msg.message == WM_QUIT) [[unlikely]] {
                 g_isRunning = false;
                 break;
             }
@@ -227,7 +270,7 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
             DispatchMessage(&msg);
         }
 
-        if (!g_isRunning) break;
+        if (!g_isRunning) [[unlikely]] break;
 
         LARGE_INTEGER currentTime;
         QueryPerformanceCounter(&currentTime);
@@ -254,4 +297,3 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
 
     return static_cast<int>(msg.wParam);
 }
-
