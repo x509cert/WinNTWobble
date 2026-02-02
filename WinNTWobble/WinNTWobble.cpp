@@ -20,6 +20,16 @@ constexpr float BASE_WIDTH = 293.0f;
 constexpr float TWO_PI = std::numbers::pi_v<float> * 2.0f;
 constexpr float INV_BASE_WIDTH = 0.50f / BASE_WIDTH;
 
+// Helper macro for extracting x from lParam in mouse messages
+#ifndef GET_X_LPARAM
+#define GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
+#endif
+
+// Helper macro for extracting y from lParam in mouse messages
+#ifndef GET_Y_LPARAM
+#define GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
+#endif
+
 // GDI resources
 HDC g_hdcBack = nullptr;
 HDC g_hdcWindow = nullptr;  // Cached window DC (CS_OWNDC)
@@ -42,6 +52,8 @@ float g_colorProgress = 0.0f;
 LARGE_INTEGER g_perfFreq, g_lastTime;
 bool g_isRunning = true;
 bool g_showBorder = true;
+int g_mouseStartX = -1;
+int g_mouseStartY = -1;
 
 std::mt19937 g_rng{std::random_device{}()};
 std::uniform_real_distribution<float> g_colorDist{0.0f, 1.0f};
@@ -272,6 +284,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         QueryPerformanceFrequency(&g_perfFreq);
         QueryPerformanceCounter(&g_lastTime);
         CreateBackBuffer(hWnd);
+        // Initialize mouse baseline
+        POINT pt; GetCursorPos(&pt);
+        g_mouseStartX = pt.x; g_mouseStartY = pt.y;
         return 0;
 
     case WM_SIZE:
@@ -280,10 +295,36 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         return 0;
 
     case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        // Any key exits screensaver; keep 'B' toggle when running as app
         if (wParam == 'B') {
             g_showBorder = !g_showBorder;
         }
+        g_isRunning = false;
+        PostQuitMessage(0);
         return 0;
+
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        g_isRunning = false;
+        PostQuitMessage(0);
+        return 0;
+
+    case WM_MOUSEMOVE: {
+        // Exit if mouse moved significantly from initial position
+        const int x = GET_X_LPARAM(lParam);
+        const int y = GET_Y_LPARAM(lParam);
+        if (g_mouseStartX >= 0 && g_mouseStartY >= 0) {
+            if (std::abs(x - g_mouseStartX) > 8 || std::abs(y - g_mouseStartY) > 8) {
+                g_isRunning = false;
+                PostQuitMessage(0);
+            }
+        } else {
+            g_mouseStartX = x; g_mouseStartY = y;
+        }
+        return 0;
+    }
 
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -311,14 +352,21 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
                        nullptr, LoadCursor(nullptr, IDC_ARROW), nullptr, nullptr, L"NTWobble", nullptr };
     RegisterClassExW(&wc);
 
-    HWND hWnd = CreateWindowExW(0, L"NTWobble", L"NT Wobble", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 600, 500, nullptr, nullptr, hInstance, nullptr);
+    // Create borderless fullscreen window suitable for screensaver
+    const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    HWND hWnd = CreateWindowExW(WS_EX_TOPMOST, L"NTWobble", L"NT Wobble", WS_POPUP,
+        0, 0, screenWidth, screenHeight, nullptr, nullptr, hInstance, nullptr);
     if (!hWnd) [[unlikely]] return 0;
 
     // Cache window DC (CS_OWNDC ensures it's private and persistent)
     g_hdcWindow = GetDC(hWnd);
 
-    ShowWindow(hWnd, nCmdShow);
+    // Hide cursor for screensaver mode
+    ShowCursor(FALSE);
+
+    // Show fullscreen window
+    ShowWindow(hWnd, SW_SHOW);
     UpdateWindow(hWnd);
 
     MSG msg {};
@@ -358,5 +406,7 @@ int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPSTR, _
         DwmFlush();
     }
 
+    // Restore cursor visibility before exit
+    ShowCursor(TRUE);
     return static_cast<int>(msg.wParam);
 }

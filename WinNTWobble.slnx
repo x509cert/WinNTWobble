@@ -4,5 +4,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="WinNTWobble/WinNTWobble.vcxproj" />
+  <Project Path="WinNTWobble/WinNTWobble.vcxproj" Id="defdf388-af66-49c5-8737-e36885d86706" />
 </Solution>
